@@ -42,6 +42,14 @@ struct Args {
     /// Optional SQLite data directory (uses in-memory DB if omitted)
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// Optional Bearer authentication token for protected gRPC BPA endpoints
+    #[arg(long, env = "DTN_HDY_TOKEN")]
+    token: Option<String>,
+
+    /// Optional Unix Domain Socket path for connecting to a protected local BPA
+    #[arg(long, env = "DTN_HDY_SOCKET")]
+    socket: Option<String>,
 }
 
 #[tokio::main]
@@ -83,7 +91,11 @@ async fn main() -> anyhow::Result<()> {
         )?
     };
 
-    let grpc_bpa = Arc::new(GrpcBpaClient::new(args.bpa_grpc));
+    let grpc_bpa = Arc::new(GrpcBpaClient::with_auth(
+        args.bpa_grpc,
+        args.token.as_deref(),
+        args.socket.as_deref(),
+    ));
     let bpa_reg: Arc<dyn BpaRegistration> = grpc_bpa.clone().as_registration();
     let bpa: Arc<dyn BpaClient> = grpc_bpa;
     let service_tracker = ServiceTracker::new(bpa_reg.clone());
