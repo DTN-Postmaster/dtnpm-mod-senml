@@ -124,9 +124,7 @@ impl WebModule for SenmlModule {
 
     fn api_routes(&self, ctx: &ModuleContext) -> Router<()> {
         let senml_manager = self.get_or_init_manager(ctx).unwrap_or_else(|e| {
-            tracing::warn!(
-                "SenmlModule: falling back to in-memory storage after init error: {e}"
-            );
+            tracing::warn!("SenmlModule: falling back to in-memory storage after init error: {e}");
             SenmlManager::new(
                 SenmlStorage::new(None, None).expect("in-memory SenmlStorage must succeed"),
             )

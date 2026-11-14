@@ -11,6 +11,7 @@ use hardy_bpv7::eid::Eid;
 use serde_json::Value;
 
 #[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
 async fn test_senml_service_and_api_endpoints() {
     let mut config = HamConfig::default();
     config.callsign = Some("F5TEST".to_string());
