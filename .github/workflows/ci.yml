@@ -1,0 +1,26 @@
+# Expects sibling checkouts of dtnpm-core (`../dtnpm-core`), dtnpm-web-core (`../dtnpm-web-core`), and hardy (`../../hardy`).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: SenML Telemetry Module Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dtn-postmaster/dtnpm-mod-senml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dtn-postmaster/dtnpm-mod-senml
+      - name: Run cargo test --all-targets
+        working-directory: dtn-postmaster/dtnpm-mod-senml
+        run: cargo test --all-targets
