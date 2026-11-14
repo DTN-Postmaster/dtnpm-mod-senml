@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum accepted raw SenML payload size (1 MiB).
+pub const MAX_SENML_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Maximum accepted number of SenML records in a single pack.
+pub const MAX_SENML_RECORDS: usize = 4096;
+/// RFC 8428 default SenML version.
+const SENML_VERSION: i128 = 10;
+
 /// Normalized SenML record representing a single measurement point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalizedSenmlRecord {
@@ -24,30 +31,41 @@ pub fn parse_senml_payload(
     data: &[u8],
     fallback_timestamp_ms: i64,
 ) -> anyhow::Result<Vec<NormalizedSenmlRecord>> {
+    if data.len() > MAX_SENML_PAYLOAD_BYTES {
+        anyhow::bail!(
+            "SenML payload size {} bytes exceeds 1 MiB limit ({} bytes)",
+            data.len(),
+            MAX_SENML_PAYLOAD_BYTES
+        );
+    }
+
     let trimmed = match std::str::from_utf8(data) {
         Ok(s) => s.trim_start(),
         Err(_) => "",
     };
 
-    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
-        && let Ok(records) = parse_json_senml(data, fallback_timestamp_ms)
-        && !records.is_empty()
-    {
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        let records = parse_json_senml(data, fallback_timestamp_ms)?;
+        if records.is_empty() {
+            anyhow::bail!("SenML JSON pack contains no valid records");
+        }
         return Ok(records);
     }
 
     // Try CBOR decoding
-    if let Ok(records) = parse_cbor_senml(data, fallback_timestamp_ms)
-        && !records.is_empty()
-    {
+    if let Ok(records) = parse_cbor_senml(data, fallback_timestamp_ms) {
+        if records.is_empty() {
+            anyhow::bail!("SenML CBOR pack contains no valid records");
+        }
         return Ok(records);
     }
 
     // Fallback: try JSON if not tried yet
-    if !trimmed.is_empty()
-        && let Ok(records) = parse_json_senml(data, fallback_timestamp_ms)
-    {
-        return Ok(records);
+    if !trimmed.is_empty() {
+        let records = parse_json_senml(data, fallback_timestamp_ms)?;
+        if !records.is_empty() {
+            return Ok(records);
+        }
     }
 
     anyhow::bail!("Payload could not be parsed as RFC 8428 SenML JSON or CBOR")
@@ -71,6 +89,22 @@ fn calculate_time_ms(time_sec: f64, fallback_timestamp_ms: i64) -> i64 {
     }
 }
 
+fn json_finite_f64(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> anyhow::Result<Option<f64>> {
+    let Some(val) = map.get(key) else {
+        return Ok(None);
+    };
+    let f = val
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("SenML JSON field '{key}' must be a finite number"))?;
+    if !f.is_finite() {
+        anyhow::bail!("SenML JSON field '{key}' must be finite");
+    }
+    Ok(Some(f))
+}
+
 fn parse_json_senml(
     data: &[u8],
     fallback_timestamp_ms: i64,
@@ -82,34 +116,83 @@ fn parse_json_senml(
         _ => anyhow::bail!("Expected JSON array or object for SenML"),
     };
 
-    let mut records = Vec::new();
+    if array.len() > MAX_SENML_RECORDS {
+        anyhow::bail!(
+            "SenML pack has {} records, exceeding limit of {}",
+            array.len(),
+            MAX_SENML_RECORDS
+        );
+    }
+
+    let mut records = Vec::with_capacity(array.len());
     let mut base_name = String::new();
     let mut base_time = 0.0f64;
     let mut base_unit: Option<String> = None;
     let mut base_value = 0.0f64;
+    let mut base_sum = 0.0f64;
 
     for item in array {
         let Some(map) = item.as_object() else {
-            continue;
+            anyhow::bail!("Each SenML JSON record must be an object");
         };
+
+        if let Some(bver_val) = map.get("bver") {
+            let bver = bver_val
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("SenML 'bver' must be integer 10"))?;
+            if i128::from(bver) != SENML_VERSION {
+                anyhow::bail!("Unsupported SenML version bver={bver}; expected {SENML_VERSION}");
+            }
+        }
 
         if let Some(bn) = map.get("bn").and_then(|v| v.as_str()) {
             base_name = bn.to_string();
         }
-        if let Some(bt) = map.get("bt").and_then(|v| v.as_f64()) {
+        if let Some(bt) = json_finite_f64(map, "bt")? {
             base_time = bt;
         }
         if let Some(bu) = map.get("bu").and_then(|v| v.as_str()) {
             base_unit = Some(bu.to_string());
         }
-        if let Some(bv) = map.get("bv").and_then(|v| v.as_f64()) {
+        if let Some(bv) = json_finite_f64(map, "bv")? {
             base_value = bv;
         }
+        if let Some(bs) = json_finite_f64(map, "bs")? {
+            base_sum = bs;
+        }
+
+        let v_opt = json_finite_f64(map, "v")?;
+        let s_opt = json_finite_f64(map, "s")?;
+        let vs_opt = map.get("vs").and_then(|v| v.as_str());
+        let vb_opt = map.get("vb").and_then(|v| v.as_bool());
+        let vd_opt = map.get("vd").and_then(|v| v.as_str());
+
+        let (value, str_value) = if let Some(v) = v_opt {
+            let total_v = v + base_value;
+            if !total_v.is_finite() {
+                anyhow::bail!("Non-finite SenML resolved value");
+            }
+            (Some(total_v), Some(format_float(total_v)))
+        } else if let Some(vs) = vs_opt {
+            (None, Some(vs.to_string()))
+        } else if let Some(vb) = vb_opt {
+            (Some(if vb { 1.0 } else { 0.0 }), Some(vb.to_string()))
+        } else if let Some(vd) = vd_opt {
+            (None, Some(vd.to_string()))
+        } else if let Some(s) = s_opt {
+            let total_s = s + base_sum;
+            if !total_s.is_finite() {
+                anyhow::bail!("Non-finite SenML resolved sum");
+            }
+            (Some(total_s), Some(format_float(total_s)))
+        } else {
+            anyhow::bail!("SenML record missing required value field (v, vs, vb, vd, or s)");
+        };
 
         let n = map.get("n").and_then(|v| v.as_str());
         let full_name = format!("{}{}", base_name, n.unwrap_or_default());
         if full_name.is_empty() {
-            continue;
+            anyhow::bail!("SenML record resolved to an empty metric name");
         }
 
         let u = map
@@ -118,24 +201,12 @@ fn parse_json_senml(
             .map(|s| s.to_string())
             .or_else(|| base_unit.clone());
 
-        let t = map.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let timestamp_ms = calculate_time_ms(base_time + t, fallback_timestamp_ms);
-
-        let (value, str_value) = if let Some(v) = map.get("v").and_then(|v| v.as_f64()) {
-            let total_v = v + base_value;
-            (Some(total_v), Some(format_float(total_v)))
-        } else if let Some(vs) = map.get("vs").and_then(|v| v.as_str()) {
-            (None, Some(vs.to_string()))
-        } else if let Some(vb) = map.get("vb").and_then(|v| v.as_bool()) {
-            (Some(if vb { 1.0 } else { 0.0 }), Some(vb.to_string()))
-        } else if let Some(vd) = map.get("vd").and_then(|v| v.as_str()) {
-            (None, Some(vd.to_string()))
-        } else if n.is_some() {
-            // Entry with name only (e.g. metadata ping or 0 value)
-            (Some(base_value), Some(format_float(base_value)))
-        } else {
-            continue;
-        };
+        let t = json_finite_f64(map, "t")?.unwrap_or(0.0);
+        let abs_t = base_time + t;
+        if !abs_t.is_finite() {
+            anyhow::bail!("Non-finite SenML timestamp");
+        }
+        let timestamp_ms = calculate_time_ms(abs_t, fallback_timestamp_ms);
 
         records.push(NormalizedSenmlRecord {
             name: full_name,
@@ -157,6 +228,14 @@ fn format_float(val: f64) -> String {
     }
 }
 
+fn cbor_key_matches(key: &ciborium::value::Value, str_key: &str, int_key: i128) -> bool {
+    match key {
+        ciborium::value::Value::Text(s) => s == str_key,
+        ciborium::value::Value::Integer(i) => i128::from(*i) == int_key,
+        _ => false,
+    }
+}
+
 fn parse_cbor_senml(
     data: &[u8],
     fallback_timestamp_ms: i64,
@@ -168,28 +247,44 @@ fn parse_cbor_senml(
         _ => anyhow::bail!("Expected CBOR array or map for SenML"),
     };
 
-    let mut records = Vec::new();
+    if items.len() > MAX_SENML_RECORDS {
+        anyhow::bail!(
+            "SenML CBOR pack has {} records, exceeding limit of {}",
+            items.len(),
+            MAX_SENML_RECORDS
+        );
+    }
+
+    let mut records = Vec::with_capacity(items.len());
     let mut base_name = String::new();
     let mut base_time = 0.0f64;
     let mut base_unit: Option<String> = None;
     let mut base_value = 0.0f64;
+    let mut base_sum = 0.0f64;
 
     for item in items {
         let ciborium::value::Value::Map(entries) = item else {
-            continue;
+            anyhow::bail!("Each SenML CBOR record must be a map");
         };
+
+        // Reject any non-finite floats anywhere in the CBOR record map.
+        for (k, v) in &entries {
+            if let ciborium::value::Value::Float(f) = v
+                && !f.is_finite()
+            {
+                anyhow::bail!("Non-finite float in CBOR SenML record");
+            }
+            if cbor_key_matches(k, "bver", -1) {
+                match v {
+                    ciborium::value::Value::Integer(i) if i128::from(*i) == SENML_VERSION => {}
+                    _ => anyhow::bail!("Unsupported SenML CBOR version; expected {SENML_VERSION}"),
+                }
+            }
+        }
 
         let get_str = |str_key: &str, int_key: i128| -> Option<String> {
             for (k, v) in &entries {
-                let matches = match k {
-                    ciborium::value::Value::Text(s) => s == str_key,
-                    ciborium::value::Value::Integer(i) => {
-                        let k_int: i128 = (*i).into();
-                        k_int == int_key
-                    }
-                    _ => false,
-                };
-                if matches {
+                if cbor_key_matches(k, str_key, int_key) {
                     match v {
                         ciborium::value::Value::Text(s) => return Some(s.clone()),
                         ciborium::value::Value::Bytes(b) => {
@@ -202,41 +297,35 @@ fn parse_cbor_senml(
             None
         };
 
-        let get_f64 = |str_key: &str, int_key: i128| -> Option<f64> {
+        let get_f64 = |str_key: &str, int_key: i128| -> anyhow::Result<Option<f64>> {
             for (k, v) in &entries {
-                let matches = match k {
-                    ciborium::value::Value::Text(s) => s == str_key,
-                    ciborium::value::Value::Integer(i) => {
-                        let k_int: i128 = (*i).into();
-                        k_int == int_key
-                    }
-                    _ => false,
-                };
-                if matches {
+                if cbor_key_matches(k, str_key, int_key) {
                     match v {
-                        ciborium::value::Value::Float(f) => return Some(*f),
-                        ciborium::value::Value::Integer(i) => {
-                            let val: i128 = (*i).into();
-                            return Some(val as f64);
+                        ciborium::value::Value::Float(f) => {
+                            if !f.is_finite() {
+                                anyhow::bail!("Non-finite CBOR float for '{str_key}'");
+                            }
+                            return Ok(Some(*f));
                         }
-                        _ => return None,
+                        ciborium::value::Value::Integer(i) => {
+                            let val = i128::from(*i) as f64;
+                            if !val.is_finite() {
+                                anyhow::bail!("Non-finite CBOR integer conversion for '{str_key}'");
+                            }
+                            return Ok(Some(val));
+                        }
+                        _ => anyhow::bail!("Invalid non-numeric CBOR value for '{str_key}'"),
                     }
                 }
             }
-            None
+            Ok(None)
         };
 
         let get_bool = |str_key: &str, int_key: i128| -> Option<bool> {
             for (k, v) in &entries {
-                let matches = match k {
-                    ciborium::value::Value::Text(s) => s == str_key,
-                    ciborium::value::Value::Integer(i) => {
-                        let k_int: i128 = (*i).into();
-                        k_int == int_key
-                    }
-                    _ => false,
-                };
-                if matches && let ciborium::value::Value::Bool(b) = v {
+                if cbor_key_matches(k, str_key, int_key)
+                    && let ciborium::value::Value::Bool(b) = v
+                {
                     return Some(*b);
                 }
             }
@@ -244,38 +333,35 @@ fn parse_cbor_senml(
         };
 
         // RFC 8428 Section 6 integer labels:
-        // bn: -2, bt: -3, bu: -4, bv: -5
+        // bver: -1, bn: -2, bt: -3, bu: -4, bv: -5, bs: -6
         if let Some(bn) = get_str("bn", -2) {
             base_name = bn;
         }
-        if let Some(bt) = get_f64("bt", -3) {
+        if let Some(bt) = get_f64("bt", -3)? {
             base_time = bt;
         }
         if let Some(bu) = get_str("bu", -4) {
             base_unit = Some(bu);
         }
-        if let Some(bv) = get_f64("bv", -5) {
+        if let Some(bv) = get_f64("bv", -5)? {
             base_value = bv;
         }
-
-        // n: 0, u: 1, v: 2, vs: 3, vb: 4, vd: 8, t: 6
-        let n = get_str("n", 0);
-        let full_name = format!("{}{}", base_name, n.as_deref().unwrap_or_default());
-        if full_name.is_empty() {
-            continue;
+        if let Some(bs) = get_f64("bs", -6)? {
+            base_sum = bs;
         }
 
-        let u = get_str("u", 1).or_else(|| base_unit.clone());
-        let t = get_f64("t", 6).unwrap_or(0.0);
-        let timestamp_ms = calculate_time_ms(base_time + t, fallback_timestamp_ms);
-
-        let v_opt = get_f64("v", 2);
+        // n: 0, u: 1, v: 2, vs: 3, vb: 4, s: 5, t: 6, vd: 8
+        let v_opt = get_f64("v", 2)?;
         let vs_opt = get_str("vs", 3);
         let vb_opt = get_bool("vb", 4);
         let vd_opt = get_str("vd", 8);
+        let s_opt = get_f64("s", 5)?;
 
         let (value, str_value) = if let Some(v) = v_opt {
             let total = v + base_value;
+            if !total.is_finite() {
+                anyhow::bail!("Non-finite CBOR SenML resolved value");
+            }
             (Some(total), Some(format_float(total)))
         } else if let Some(vs) = vs_opt {
             (None, Some(vs))
@@ -283,11 +369,29 @@ fn parse_cbor_senml(
             (Some(if vb { 1.0 } else { 0.0 }), Some(vb.to_string()))
         } else if let Some(vd) = vd_opt {
             (None, Some(vd))
-        } else if n.is_some() {
-            (Some(base_value), Some(format_float(base_value)))
+        } else if let Some(s) = s_opt {
+            let total_s = s + base_sum;
+            if !total_s.is_finite() {
+                anyhow::bail!("Non-finite CBOR SenML resolved sum");
+            }
+            (Some(total_s), Some(format_float(total_s)))
         } else {
-            continue;
+            anyhow::bail!("SenML CBOR record missing required value field (v, vs, vb, vd, or s)");
         };
+
+        let n = get_str("n", 0);
+        let full_name = format!("{}{}", base_name, n.as_deref().unwrap_or_default());
+        if full_name.is_empty() {
+            anyhow::bail!("SenML CBOR record resolved to an empty metric name");
+        }
+
+        let u = get_str("u", 1).or_else(|| base_unit.clone());
+        let t = get_f64("t", 6)?.unwrap_or(0.0);
+        let abs_t = base_time + t;
+        if !abs_t.is_finite() {
+            anyhow::bail!("Non-finite CBOR SenML timestamp");
+        }
+        let timestamp_ms = calculate_time_ms(abs_t, fallback_timestamp_ms);
 
         records.push(NormalizedSenmlRecord {
             name: full_name,
@@ -308,14 +412,15 @@ mod tests {
     #[test]
     fn test_parse_json_senml_pack() {
         let json_data = r#"[
-            {"bn": "urn:dtn:node1:", "bt": 1731000000, "bu": "V", "n": "bus_voltage", "v": 27.9},
+            {"bver": 10, "bn": "urn:dtn:node1:", "bt": 1731000000, "bu": "V", "n": "bus_voltage", "v": 27.9},
             {"n": "temp/cpu", "u": "Cel", "v": 42.5},
             {"n": "status/online", "vb": true},
-            {"n": "state/mode", "vs": "STANDBY"}
+            {"n": "state/mode", "vs": "STANDBY"},
+            {"bs": 100.0, "n": "energy_total", "s": 25.5}
         ]"#;
 
         let records = parse_senml_payload(json_data.as_bytes(), 1700000000000).unwrap();
-        assert_eq!(records.len(), 4);
+        assert_eq!(records.len(), 5);
 
         assert_eq!(records[0].name, "urn:dtn:node1:bus_voltage");
         assert_eq!(records[0].value, Some(27.9));
@@ -334,6 +439,10 @@ mod tests {
         assert_eq!(records[3].name, "urn:dtn:node1:state/mode");
         assert_eq!(records[3].value, None);
         assert_eq!(records[3].str_value.as_deref(), Some("STANDBY"));
+
+        assert_eq!(records[4].name, "urn:dtn:node1:energy_total");
+        assert_eq!(records[4].value, Some(125.5));
+        assert_eq!(records[4].str_value.as_deref(), Some("125.5"));
     }
 
     #[test]
@@ -349,40 +458,104 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cbor_senml_pack() {
-        // Build a CBOR pack manually using ciborium
-        let entries = vec![ciborium::value::Value::Map(vec![
-            (
-                ciborium::value::Value::Integer((-2).into()),
-                ciborium::value::Value::Text("urn:cbor:station:".to_string()),
-            ),
-            (
-                ciborium::value::Value::Integer((-3).into()),
-                ciborium::value::Value::Float(1731000050.0),
-            ),
-            (
-                ciborium::value::Value::Integer(0.into()),
-                ciborium::value::Value::Text("solar_amps".to_string()),
-            ),
-            (
-                ciborium::value::Value::Integer(1.into()),
-                ciborium::value::Value::Text("A".to_string()),
-            ),
-            (
-                ciborium::value::Value::Integer(2.into()),
-                ciborium::value::Value::Float(4.8),
-            ),
-        ])];
+    fn test_parse_cbor_senml_pack_and_sum() {
+        use ciborium::value::Value;
+        let entries = vec![
+            Value::Map(vec![
+                (Value::Integer((-1).into()), Value::Integer(10.into())),
+                (
+                    Value::Integer((-2).into()),
+                    Value::Text("urn:cbor:station:".to_string()),
+                ),
+                (Value::Integer((-3).into()), Value::Float(1731000050.0)),
+                (Value::Integer((-6).into()), Value::Float(10.0)),
+                (
+                    Value::Integer(0.into()),
+                    Value::Text("solar_amps".to_string()),
+                ),
+                (Value::Integer(1.into()), Value::Text("A".to_string())),
+                (Value::Integer(2.into()), Value::Float(4.8)),
+            ]),
+            Value::Map(vec![
+                (
+                    Value::Integer(0.into()),
+                    Value::Text("rx_packets".to_string()),
+                ),
+                (Value::Integer(5.into()), Value::Float(7.0)),
+            ]),
+        ];
 
         let mut cbor_bytes = Vec::new();
-        ciborium::into_writer(&ciborium::value::Value::Array(entries), &mut cbor_bytes).unwrap();
+        ciborium::into_writer(&Value::Array(entries), &mut cbor_bytes).unwrap();
 
         let records = parse_senml_payload(&cbor_bytes, 1700000000000).unwrap();
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), 2);
         assert_eq!(records[0].name, "urn:cbor:station:solar_amps");
         assert_eq!(records[0].unit.as_deref(), Some("A"));
         assert_eq!(records[0].value, Some(4.8));
         assert_eq!(records[0].timestamp_ms, 1731000050000);
+
+        assert_eq!(records[1].name, "urn:cbor:station:rx_packets");
+        assert_eq!(records[1].value, Some(17.0));
+    }
+
+    #[test]
+    fn test_rejects_oversized_payload_and_too_many_records() {
+        let oversized = vec![b' '; MAX_SENML_PAYLOAD_BYTES + 1];
+        assert!(parse_senml_payload(&oversized, 1700000000000).is_err());
+
+        let too_many: Vec<serde_json::Value> = (0..=MAX_SENML_RECORDS)
+            .map(|i| serde_json::json!({"n": format!("m{i}"), "v": 1.0}))
+            .collect();
+        let bytes = serde_json::to_vec(&too_many).unwrap();
+        assert!(bytes.len() < MAX_SENML_PAYLOAD_BYTES);
+        assert!(parse_senml_payload(&bytes, 1700000000000).is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_bver_and_missing_value_fields() {
+        let bad_bver_json = br#"[{"bver": 9, "n": "temp", "v": 20.0}]"#;
+        assert!(parse_senml_payload(bad_bver_json, 1700000000000).is_err());
+
+        let no_val_json = br#"[{"bn": "urn:s:", "n": "temp"}]"#;
+        assert!(parse_senml_payload(no_val_json, 1700000000000).is_err());
+
+        // CBOR with bad bver
+        use ciborium::value::Value;
+        let bad_bver_cbor = vec![Value::Map(vec![
+            (Value::Integer((-1).into()), Value::Integer(11.into())),
+            (Value::Integer(0.into()), Value::Text("m".into())),
+            (Value::Integer(2.into()), Value::Float(1.0)),
+        ])];
+        let mut buf = Vec::new();
+        ciborium::into_writer(&Value::Array(bad_bver_cbor), &mut buf).unwrap();
+        assert!(parse_senml_payload(&buf, 1700000000000).is_err());
+
+        // CBOR with no value field
+        let no_val_cbor = vec![Value::Map(vec![(
+            Value::Integer(0.into()),
+            Value::Text("m".into()),
+        )])];
+        buf.clear();
+        ciborium::into_writer(&Value::Array(no_val_cbor), &mut buf).unwrap();
+        assert!(parse_senml_payload(&buf, 1700000000000).is_err());
+    }
+
+    #[test]
+    fn test_rejects_non_finite_cbor_floats() {
+        use ciborium::value::Value;
+        for bad_float in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let entries = vec![Value::Map(vec![
+                (Value::Integer(0.into()), Value::Text("bad".into())),
+                (Value::Integer(2.into()), Value::Float(bad_float)),
+            ])];
+            let mut buf = Vec::new();
+            ciborium::into_writer(&Value::Array(entries), &mut buf).unwrap();
+            assert!(
+                parse_senml_payload(&buf, 1700000000000).is_err(),
+                "must reject non-finite float {bad_float}"
+            );
+        }
     }
 
     #[test]

@@ -555,26 +555,50 @@ impl SenmlStorage {
             })
             .collect();
 
-        let yaml_str = match std::fs::read_to_string(&path) {
+        let content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(_) => return Ok(()),
         };
 
-        let mut val: serde_yaml::Value = match serde_yaml::from_str(&yaml_str) {
-            Ok(v) => v,
-            Err(_) => return Ok(()),
+        let is_toml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
+
+        let new_content = if is_toml {
+            let mut doc: toml::Value = match toml::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => return Ok(()),
+            };
+            if let Some(table) = doc.as_table_mut() {
+                let senml_val = toml::Value::try_from(dtnpm_core::config::SenmlConfig {
+                    metrics: metric_configs,
+                })?;
+                table.insert("senml".to_string(), senml_val);
+                Some(toml::to_string_pretty(&doc)?)
+            } else {
+                None
+            }
+        } else {
+            let mut val: yaml_serde::Value = match yaml_serde::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => return Ok(()),
+            };
+            if let Some(map) = val.as_mapping_mut() {
+                let senml_key = yaml_serde::Value::String("senml".to_string());
+                let senml_val = yaml_serde::to_value(dtnpm_core::config::SenmlConfig {
+                    metrics: metric_configs,
+                })?;
+                map.insert(senml_key, senml_val);
+                Some(yaml_serde::to_string(&val)?)
+            } else {
+                None
+            }
         };
 
-        if let Some(map) = val.as_mapping_mut() {
-            let senml_key = serde_yaml::Value::String("senml".to_string());
-            let senml_val = serde_yaml::to_value(dtnpm_core::config::SenmlConfig {
-                metrics: metric_configs,
-            })?;
-            map.insert(senml_key, senml_val);
-
-            let new_yaml = serde_yaml::to_string(&val)?;
+        if let Some(serialized) = new_content {
             let tmp_path = path.with_extension("tmp");
-            std::fs::write(&tmp_path, new_yaml)?;
+            std::fs::write(&tmp_path, serialized)?;
             std::fs::rename(tmp_path, path)?;
         }
 
@@ -680,5 +704,69 @@ mod tests {
             .unwrap();
         let dashboard_after = storage.get_latest_metrics(None, true).unwrap();
         assert_eq!(dashboard_after.len(), 3);
+    }
+
+    #[test]
+    fn test_persist_dashboard_config_yaml_and_toml() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // YAML persistence via pure-Rust yaml_serde
+        let yaml_path = dir.path().join("station.yaml");
+        std::fs::write(&yaml_path, "station: F4JXQ\n").unwrap();
+        let storage_yaml = SenmlStorage::new(None, Some(yaml_path.clone())).unwrap();
+        storage_yaml
+            .add_dashboard_card("urn:dtn:temp", Some("Temp".to_string()))
+            .unwrap();
+        let saved_yaml = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(saved_yaml.contains("senml:"));
+        assert!(saved_yaml.contains("urn:dtn:temp"));
+
+        // TOML persistence
+        let toml_path = dir.path().join("station.toml");
+        std::fs::write(&toml_path, "station = \"F4JXQ\"\n").unwrap();
+        let storage_toml = SenmlStorage::new(None, Some(toml_path.clone())).unwrap();
+        storage_toml
+            .add_dashboard_card("urn:dtn:volt", Some("Volt".to_string()))
+            .unwrap();
+        let saved_toml = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(saved_toml.contains("[senml]") || saved_toml.contains("metrics"));
+        assert!(saved_toml.contains("urn:dtn:volt"));
+    }
+
+    #[test]
+    fn test_insert_records_runs_in_single_transaction() {
+        let storage = SenmlStorage::new(None, None).unwrap();
+        {
+            let conn = storage.lock_conn();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_second_history BEFORE INSERT ON telemetry_history \
+                 WHEN NEW.timestamp = 2000 \
+                 BEGIN SELECT RAISE(ABORT, 'simulated second row failure'); END;",
+            )
+            .unwrap();
+        }
+        let batch = vec![
+            NormalizedSenmlRecord {
+                name: "urn:dtn:tx:a".to_string(),
+                value: Some(1.0),
+                str_value: Some("1".to_string()),
+                unit: Some("V".to_string()),
+                timestamp_ms: 1000,
+            },
+            NormalizedSenmlRecord {
+                name: "urn:dtn:tx:b".to_string(),
+                value: Some(2.0),
+                str_value: Some("2".to_string()),
+                unit: Some("V".to_string()),
+                timestamp_ms: 2000,
+            },
+        ];
+        assert!(storage.insert_records(&batch).is_err());
+        // Neither record from the failed batch must persist in telemetry_history
+        let conn = storage.lock_conn();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM telemetry_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

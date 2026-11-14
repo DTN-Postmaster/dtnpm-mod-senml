@@ -47,6 +47,10 @@ struct Args {
     #[arg(long, env = "DTN_HDY_TOKEN")]
     token: Option<String>,
 
+    /// Path to a file containing the Bearer authentication token for protected gRPC BPA endpoints
+    #[arg(long, env = "DTN_HDY_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+
     /// Optional Unix Domain Socket path for connecting to a protected local BPA
     #[arg(long, env = "DTN_HDY_SOCKET")]
     socket: Option<String>,
@@ -91,9 +95,10 @@ async fn main() -> anyhow::Result<()> {
         )?
     };
 
+    let auth_token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
     let grpc_bpa = Arc::new(GrpcBpaClient::with_auth(
         args.bpa_grpc,
-        args.token.as_deref(),
+        auth_token.as_deref(),
         args.socket.as_deref(),
     ));
     let bpa_reg: Arc<dyn BpaRegistration> = grpc_bpa.clone().as_registration();
@@ -128,4 +133,48 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+fn resolve_token(
+    token: Option<&str>,
+    token_file: Option<&std::path::Path>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(path) = token_file {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read token file '{}': {e}", path.display()))?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            anyhow::bail!("Token file '{}' is empty", path.display());
+        }
+        return Ok(Some(trimmed));
+    }
+    Ok(token
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_token;
+
+    #[test]
+    fn resolve_token_reads_and_trims_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, "  super-secret-token\n").unwrap();
+        let resolved = resolve_token(None, Some(&path)).unwrap();
+        assert_eq!(resolved.as_deref(), Some("super-secret-token"));
+    }
+
+    #[test]
+    fn resolve_token_rejects_empty_or_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, "   \n").unwrap();
+        assert!(resolve_token(None, Some(&empty)).is_err());
+
+        let missing = dir.path().join("missing");
+        assert!(resolve_token(None, Some(&missing)).is_err());
+    }
 }
