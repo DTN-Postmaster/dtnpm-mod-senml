@@ -25,6 +25,14 @@ Run the standalone mock server example:
 cargo run --example test_server
 ```
 
+## Security & Compliance
+
+- **RFC 8428 & RFC 8949 Standards Compliance**: Strict validation of `bver == 10`, non-finite float rejection (`NaN`, `Infinity`), accurate handling of `s`/`bs` accumulators, and bounded telemetry packs (2 MiB / 1,000 records max).
+- **Transactional Ingestion**: Atomically persisted records in a single SQLite transaction avoiding partial writes on stream disconnects.
+- **Cyber Resilience Act (CRA)**: `yaml_serde` configuration storage, token file security (`--token-file`), VEX audit documentation (`RUSTSEC-2026-0459`), and SHA-pinned CI actions.
+- **Rust Quality Standards**: 100% `unwrap`-free and `panic!`-free production codebase.
+- **Documentation**: See [`AGENTS.md`](AGENTS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and Architectural Decision Records in [`adr/`](adr/).
+
 ## License
 
 Dual-licensed under the Apache License, Version 2.0 or the MIT License (crate metadata: `Apache-2.0`). See [LICENSE.md](LICENSE.md).
