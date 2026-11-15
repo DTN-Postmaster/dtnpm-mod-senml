@@ -26,7 +26,7 @@ axum = "0.8"
 bytes = "1.10"
 ciborium = "0.2"
 futures-util = "0.3"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
