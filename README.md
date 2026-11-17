@@ -2,6 +2,10 @@
 
 Fullstack **DTN SenML Telemetry** (RFC 8428) plugin for **DTN Postmaster** (`dtnpm`), implementing `dtnpm_web_core::WebModule`.
 
+## Screenshot
+
+![SenML Telemetry Dashboard](docs/screenshots/senml.png)
+
 ## Features
 
 - **SenML Parser (`parser`)**: Decodes RFC 8428 CBOR and JSON SenML packs and extracts measurements.
