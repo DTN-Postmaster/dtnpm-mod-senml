@@ -1,21 +1,21 @@
-# Guide de Contribution — `dtnpm-mod-senml`
+# Contributing Guide — `dtnpm-mod-senml`
 
-Ce guide présente les règles de développement et les exigences de sécurité pour le module de télémétrie SenML de `dtnpm-mod-senml`.
-
----
-
-## 1. Principes Fondamentaux
-
-- **Zéro Panic / Zéro Unwrap** : Aucun appel `.unwrap()` ou `.expect()` en code de production.
-- **Conformité RFC 8428 / RFC 8949** :
-  - Toujours valider strictement les types de données SenML et refuser les valeurs non finies (`NaN`, `Infinity`).
-  - Toujours borner la taille des packs entrants et insérer les séries temporelles de manière transactionnelle.
-- **Traçabilité Architecturale (ADR)** :
-  - Tout changement de format ou de persistance doit faire l'objet d'un fichier ADR sous `adr/` et être indexé dans `adr/README.md`.
+This guide outlines the development rules and security requirements for the `dtnpm-mod-senml` SenML telemetry module.
 
 ---
 
-## 2. Vérification Locale
+## 1. Core Principles
+
+- **Zero Panic / Zero Unwrap**: No `.unwrap()` or `.expect()` calls in production code.
+- **RFC 8428 / RFC 8949 Compliance**:
+  - Always strictly validate SenML data types and reject non-finite values (`NaN`, `Infinity`).
+  - Always bound the size of inbound packs and insert time-series data transactionally.
+- **Architectural Traceability (ADR)**:
+  - Any change to the format or persistence layer must be documented in an ADR file under `adr/` and indexed in `adr/README.md`.
+
+---
+
+## 2. Local Verification
 
 ```bash
 cargo fmt --all -- --check

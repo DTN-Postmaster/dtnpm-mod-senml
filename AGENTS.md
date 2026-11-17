@@ -1,44 +1,50 @@
 # Agent Guide — `dtnpm-mod-senml`
 
 ## 🎯 Mission
-Fournir le module applicatif complet (Fullstack WebModule) de télémétrie SenML (RFC 8428) pour **DTN Postmaster**, comprenant le décodeur CBOR / JSON, le service d'ingestion BPA (`SenmlService`), la persistance transactionnelle SQLite (`SenmlStorage`), l'API REST/SSE `/api/senml/v1/...` et le composant d'interface Preact `<SenmlView />`.
+Provide the complete fullstack SenML telemetry (RFC 8428) application module (`WebModule`) for **DTN Postmaster**, including the CBOR / JSON decoder, the BPA ingestion service (`SenmlService`), transactional SQLite persistence (`SenmlStorage`), the `/api/senml/v1/...` REST/SSE API, and the Preact UI component `<SenmlView />`.
 
 ---
 
-## 🛡️ Référentiels et Exigences de Sécurité
+## 📝 Documentation Language
 
-### 1. Cyber Resilience Act (CRA) & Conformité RFC 8428 / RFC 8949
-- **Validation Rigoureuse des Packs SenML** :
-  - **Version (`bver`)** : Si le champ `bver` est spécifié, il DOIT être égal à `10` (RFC 8428). Toute autre valeur doit être rejetée avec une erreur explicite.
-  - **Sommes (`s` / `bs`)** : Les valeurs d'accumulation ne doivent pas être artificiellement écrasées à `0.0` si absentes.
-  - **Nombres non finis** : Rejet strict des flottants `NaN`, `Infinity` et `-Infinity` en encodage CBOR et JSON afin de prévenir l'empoisonnement des calculs et bases de données.
-- **Bornage des Ressources & DoS** :
-  - Tout pack SenML est strictement borné : taille maximale de 2 Mio et 1 000 enregistrements maximum par payload.
-- **Écritures Transactionnelles et Atomiques** :
-  - Toutes les insertions d'enregistrements d'un même pack dans la base SQLite s'exécutent au sein d'une unique transaction (`conn.transaction()`) garantissant l'atomicité et évitant les incohérences partielles.
-- **Supply-Chain & VEX** :
-  - Utilisation de `yaml_serde` (sans libyaml).
-  - VEX `not_affected` consigné pour `RUSTSEC-2026-0459`. Actions CI épinglées par SHA-1 à 40 caractères.
-- **Politique de sécurité** : Consignée dans [SECURITY.md](SECURITY.md).
-
-### 2. BPSec & Robustesse Frontend
-- **Politique de Signature** : Rejet impératif des paquets non signés ou invalides lorsque `VerifyPolicy::Strict` est active.
-- **Cycle de Vie des Timers UI (`SenmlView.tsx`)** :
-  - Tous les handles de clignotement (`setTimeout`) sur réception d'événements SSE sont enregistrés dans un ensemble (`Set`) et systématiquement libérés (`clearTimeout`) lors du démontage du composant pour prévenir les fuites de mémoire dans le navigateur.
+- **English by Default**: English must be used as the language for all documentation, unless the file is suffixed with `.fr.md` or another language is explicitly requested in the prompt.
 
 ---
 
-## 🦀 Standards d'Ingénierie Rust
+## 🛡️ Security Frameworks and Requirements
 
-1. **Règle Zéro Panic / Zéro Unwrap** :
-   - Tout le code sous `src/` doit être 100% exempt de `.unwrap()`, `.expect()` et de macro `panic!`.
-   - Linter strict : `-D warnings -D clippy::unwrap_used -D clippy::panic`.
-2. **ADRs Obligatoires** :
-   - Toute décision architecturale SenML doit être consignée sous `adr/` et indexée dans [adr/README.md](adr/README.md).
+### 1. Cyber Resilience Act (CRA) & RFC 8428 / RFC 8949 Compliance
+- **Strict Validation of SenML Packs**:
+  - **Version (`bver`)**: If the `bver` field is specified, it MUST equal `10` (RFC 8428). Any other value must be rejected with an explicit error.
+  - **Sums (`s` / `bs`)**: Accumulator values must not be artificially overwritten to `0.0` when absent.
+  - **Non-finite Numbers**: Strict rejection of `NaN`, `Infinity`, and `-Infinity` floats in CBOR and JSON encoding to prevent poisoning calculations and databases.
+- **Resource Bounding & DoS**:
+  - Every SenML pack is strictly bounded: maximum size of 2 MiB and maximum of 1,000 records per payload.
+- **Transactional and Atomic Writes**:
+  - All record insertions for a single pack in the SQLite database execute within a single transaction (`conn.transaction()`), guaranteeing atomicity and preventing partial inconsistencies.
+- **Supply-Chain & VEX**:
+  - Uses `yaml_serde` (without libyaml).
+  - `not_affected` VEX recorded for `RUSTSEC-2026-0459`. CI actions pinned by full 40-character SHA-1.
+- **Security Policy**: Documented in [SECURITY.md](SECURITY.md).
+
+### 2. BPSec & Frontend Robustness
+- **Signature Policy**: Mandatory rejection of unsigned or invalid packets when `VerifyPolicy::Strict` is active.
+- **UI Timer Lifecycle (`SenmlView.tsx`)**:
+  - All blink handles (`setTimeout`) triggered upon receiving SSE events are tracked in a `Set` and systematically cleared (`clearTimeout`) on component unmount to prevent browser memory leaks.
 
 ---
 
-## ⚡ Commandes Critiques de Vérification
+## 🦀 Rust Engineering Standards
+
+1. **Zero Panic / Zero Unwrap Rule**:
+   - All code under `src/` must be 100% free of `.unwrap()`, `.expect()`, and the `panic!` macro.
+   - Strict linter: `-D warnings -D clippy::unwrap_used -D clippy::panic`.
+2. **Mandatory ADRs**:
+   - Any SenML architectural decision must be recorded under `adr/` and indexed in [adr/README.md](adr/README.md).
+
+---
+
+## ⚡ Critical Verification Commands
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --offline --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::panic`
