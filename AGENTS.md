@@ -5,9 +5,12 @@ Provide the complete fullstack SenML telemetry (RFC 8428) application module (`W
 
 ---
 
-## 📝 Documentation Language
+## 📝 Documentation & User Interface Language
 
-- **English by Default**: English must be used as the language for all documentation, unless the file is suffixed with `.fr.md` or another language is explicitly requested in the prompt.
+- **English by Default (Docs & UI)**:
+  - **Documentation**: English must be used for all documentation, unless the file is suffixed with `.fr.md` or another language is explicitly requested in the prompt.
+  - **User Interface (100% English)**: Every user-facing string in `ui/src/` and `ui/tests/` (headings, telemetry labels, chart legends, buttons, `SecurityBadge` text, `title` tooltips, `aria-label`s, dialogs, and UI error messages) MUST be in English. Keep shared components synchronized with `dtnpm-web-core/ui`.
+  - **Navigation Scope**: `SenML` is an operational top-level `Navbar` tab in `dtnpm-web-core` (`NavTabId: 'senml'`); station-level configuration, routing, security, and filtering panels belong under `Station` sub-tabs (`ConfigView.tsx`), never added as new global navbar tabs.
 
 ---
 
@@ -49,5 +52,6 @@ Provide the complete fullstack SenML telemetry (RFC 8428) application module (`W
 - `cargo fmt --all -- --check`
 - `cargo clippy --offline --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::panic`
 - `cargo test --offline --all-features`
+- `cd ui && pnpm test:e2e` (and `cd ../dtnpm-web-core/ui && pnpm build && pnpm test:e2e` when updating shared UI views)
 - `./scripts/check-security.sh --strict`
 - `./scripts/check-coverage.sh --summary-only`
